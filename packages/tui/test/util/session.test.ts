@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { isDefaultTitle, running } from "../../src/util/session"
+import { isDefaultTitle, running } from "../../src/util/session" // kilocode_change
 
 describe("util.session", () => {
   test("recognizes generated parent and child titles", () => {
@@ -8,6 +8,7 @@ describe("util.session", () => {
     expect(isDefaultTitle("New session - custom")).toBeFalse()
   })
 
+  // kilocode_change start - `scheduled` must not count as running
   test("running is true only for working statuses", () => {
     expect(running("busy")).toBeTrue()
     expect(running("retry")).toBeTrue()
@@ -15,4 +16,5 @@ describe("util.session", () => {
     expect(running("idle")).toBeFalse()
     expect(running("scheduled")).toBeFalse()
   })
+  // kilocode_change end
 })
