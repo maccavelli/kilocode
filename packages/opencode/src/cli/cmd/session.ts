@@ -3,6 +3,10 @@ import { Effect } from "effect"
 import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Session } from "@/session/session"
+import { SessionStatus } from "@/session/status" // kilocode_change
+import { Wakeup } from "@/kilocode/wakeup" // kilocode_change
+import { futureDue, mergeScheduled } from "@/kilocode/session/scheduled" // kilocode_change
+import { InstanceRef } from "@/effect/instance-ref" // kilocode_change
 import { SessionID } from "../../session/schema"
 import { UI } from "../ui"
 import { Locale } from "@/util/locale"
@@ -105,15 +109,31 @@ export const SessionListCommand = effectCmd({
 
     if (sessions.length === 0) return
 
+    // kilocode_change start - fold a future wakeup into each session's status so
+    // the list shows `scheduled <wake time>` instead of a bare idle. A plain
+    // listing stays on the memory-only, directory-scoped read (`Wakeup.scheduled`)
+    // so it never scans every project's stored wakeups. Only `--all` scans
+    // storage (`Wakeup.list`), because it must cover wakeups whose directory is
+    // not loaded in this instance.
+    const ctx = yield* InstanceRef
+    const due = args.all
+      ? futureDue(yield* Wakeup.Service.use((svc) => svc.list()))
+      : yield* Wakeup.Service.use((svc) => svc.scheduled(ctx?.directory))
+    const statuses = mergeScheduled(
+      Object.fromEntries(yield* SessionStatus.Service.use((svc) => svc.list())),
+      due,
+    )
+    // kilocode_change end
+
     // kilocode_change start
     const output =
       args.format === "json"
         ? args.all
-          ? formatGlobalSessionJSON(sessions as Session.GlobalInfo[])
-          : formatSessionJSON(sessions as Session.Info[])
+          ? formatGlobalSessionJSON(sessions as Session.GlobalInfo[], statuses)
+          : formatSessionJSON(sessions as Session.Info[], statuses)
         : args.all
-          ? formatGlobalSessionTable(sessions as Session.GlobalInfo[])
-          : formatSessionTable(sessions as Session.Info[])
+          ? formatGlobalSessionTable(sessions as Session.GlobalInfo[], statuses)
+          : formatSessionTable(sessions as Session.Info[], statuses)
     // kilocode_change end
 
     const shouldPaginate = process.stdout.isTTY && !args.maxCount && args.format === "table"
@@ -141,27 +161,44 @@ export const SessionListCommand = effectCmd({
   }),
 })
 
-function formatSessionTable(sessions: Session.Info[]): string {
+// kilocode_change start
+/** The Status column cell: the wake time for a scheduled session, its status type
+ * otherwise, and `idle` when the session carries no status at all. */
+function statusCell(status: SessionStatus.Info | undefined): string {
+  if (status?.type === "scheduled") return `scheduled ${status.scheduledAt}`
+  return status?.type ?? "idle"
+}
+
+export function formatSessionTable(
+  sessions: Session.Info[],
+  statuses: Record<string, SessionStatus.Info>,
+): string {
   const lines: string[] = []
 
   const maxIdWidth = Math.max(20, ...sessions.map((s) => s.id.length))
   const maxTitleWidth = Math.max(25, ...sessions.map((s) => s.title.length))
+  const maxStatusWidth = Math.max(6, ...sessions.map((s) => statusCell(statuses[String(s.id)]).length))
 
-  const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated`
+  const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Status${" ".repeat(maxStatusWidth - 6)}  Updated`
   lines.push(header)
   lines.push("─".repeat(header.length))
   for (const session of sessions) {
     const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
     const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
-    const line = `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr}`
+    const status = statusCell(statuses[String(session.id)])
+    const line = `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${status.padEnd(maxStatusWidth)}  ${timeStr}`
     lines.push(line)
   }
 
   return lines.join(EOL)
 }
+// kilocode_change end
 
 // kilocode_change start
-function formatSessionJSON(sessions: Session.Info[]): string {
+export function formatSessionJSON(
+  sessions: Session.Info[],
+  statuses: Record<string, SessionStatus.Info>,
+): string {
   const jsonData = sessions.map((session) => ({
     id: session.id,
     title: session.title,
@@ -169,37 +206,47 @@ function formatSessionJSON(sessions: Session.Info[]): string {
     created: session.time.created,
     projectId: session.projectID,
     directory: session.directory,
+    // The full payload, so `scheduledAt` appears only on the scheduled variant.
+    status: statuses[String(session.id)] ?? { type: "idle" as const },
   }))
   return JSON.stringify(jsonData, null, 2)
 }
 // kilocode_change end
 
 // kilocode_change start
-function formatGlobalSessionTable(sessions: Session.GlobalInfo[]): string {
+export function formatGlobalSessionTable(
+  sessions: Session.GlobalInfo[],
+  statuses: Record<string, SessionStatus.Info>,
+): string {
   const lines: string[] = []
 
   const maxIdWidth = Math.max(20, ...sessions.map((s) => s.id.length))
   const maxTitleWidth = Math.max(25, ...sessions.map((s) => s.title.length))
+  const maxStatusWidth = Math.max(6, ...sessions.map((s) => statusCell(statuses[String(s.id)]).length))
   const maxProjectWidth = Math.max(
     10,
     ...sessions.map((s) => (s.project?.name ?? s.project?.worktree ?? "unknown").length),
   )
 
-  const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Project${" ".repeat(maxProjectWidth - 7)}  Updated`
+  const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Status${" ".repeat(maxStatusWidth - 6)}  Project${" ".repeat(maxProjectWidth - 7)}  Updated`
   lines.push(header)
   lines.push("─".repeat(header.length))
   for (const session of sessions) {
     const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
     const project = Locale.truncate(session.project?.name ?? session.project?.worktree ?? "unknown", maxProjectWidth)
     const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
-    const line = `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${project.padEnd(maxProjectWidth)}  ${timeStr}`
+    const status = statusCell(statuses[String(session.id)])
+    const line = `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${status.padEnd(maxStatusWidth)}  ${project.padEnd(maxProjectWidth)}  ${timeStr}`
     lines.push(line)
   }
 
   return lines.join(EOL)
 }
 
-function formatGlobalSessionJSON(sessions: Session.GlobalInfo[]): string {
+export function formatGlobalSessionJSON(
+  sessions: Session.GlobalInfo[],
+  statuses: Record<string, SessionStatus.Info>,
+): string {
   const jsonData = sessions.map((session) => ({
     id: session.id,
     title: session.title,
@@ -210,6 +257,8 @@ function formatGlobalSessionJSON(sessions: Session.GlobalInfo[]): string {
     project: session.project
       ? { id: session.project.id, name: session.project.name, worktree: session.project.worktree }
       : null,
+    // The full payload, so `scheduledAt` appears only on the scheduled variant.
+    status: statuses[String(session.id)] ?? { type: "idle" as const },
   }))
   return JSON.stringify(jsonData, null, 2)
 }
