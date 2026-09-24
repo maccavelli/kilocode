@@ -42,6 +42,7 @@ import {
   markRenameAdopted,
 } from "@/kilo-sessions/rename-adoptions"
 import { KiloSessionTitle } from "@/kilocode/session/title"
+import { resolveDerivedSessionStatus, type DerivedSessionStatus } from "@/kilocode/session/scheduled"
 import { SessionStatus } from "@/session/status"
 import { Telemetry } from "@kilocode/kilo-telemetry"
 import { Question } from "@/question"
@@ -405,23 +406,8 @@ export namespace KiloSessions {
   const STATUS_TIMEOUT_MS = 3_000
 
   // Shared attention/status resolution for ingest sync and the remote heartbeat.
-  // Precedence: permission > question > SessionStatus (offline maps to retry).
-  type DerivedSessionStatus = "idle" | "busy" | "question" | "permission" | "retry"
-
-  function resolveDerivedSessionStatus(input: {
-    hasPermission: boolean
-    hasQuestion: boolean
-    statusType: SessionStatus.Info["type"] | undefined
-  }): DerivedSessionStatus {
-    if (input.hasPermission) return "permission"
-    if (input.hasQuestion) return "question"
-    if (input.statusType === "offline") return "retry"
-    if (input.statusType === "busy" || input.statusType === "retry" || input.statusType === "idle") {
-      return input.statusType
-    }
-    return "idle"
-  }
-
+  // The precedence lives in kilocode/session/scheduled so the HTTP status
+  // endpoint derives the same result.
   async function deriveStatus(sessionID: string): Promise<DerivedSessionStatus> {
     const { AppRuntime } = await import("@/effect/app-runtime")
     const permissions = (await AppRuntime.runPromise(Permission.Service.use((svc) => svc.list()))).filter(
